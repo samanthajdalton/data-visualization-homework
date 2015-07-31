@@ -1,0 +1,370 @@
+---
+title: "Visualization project"
+author: "Samantha Dalton"
+date: "Monday, April 05, 2015"
+output: html_document
+---
+
+```{r, echo=F, warning=FALSE, message=FALSE}
+if (!require("knitr")) install.packages("knitr")
+opts_chunk$set( fig.width = 9, fig.height = 8, dpi = 144, warning=FALSE, message=FALSE, include=TRUE, echo=TRUE, cache=TRUE, cache.comments=FALSE)
+library(dplyr)
+library(plyr)
+library(ggplot2)
+library(ggmap)
+library(RCurl)
+library(scales)
+library(gridExtra)
+
+setwd("C:\\Users\\Samantha\\Desktop\\Homework\\data_visualtization\\bikes")
+
+#read in data
+trips <- read.csv("Divvy_Trips_2014_Q1Q2.csv", header=T)
+station <- read.csv("Divvy_Stations_2014_Q1Q2.csv",header=T)
+
+
+trips$startT<-strptime(trips$starttime,format="%m/%d/%Y %H:%M")
+trips <- trips %>% select(-starttime)
+
+#Subsetting to just trips in july and august
+
+names(trips)[names(trips) == "startT"] <- "starttime" 
+trips <- trips[trips$starttime > "2014-04-30 24:00:00 CEST" & trips$starttime < "2014-06-30 24:00:00 CEST" & !is.na(trips$starttime),] 
+
+#Making new analysis variables
+trips$user_age <- 2013 - trips$birthyear
+trips$triptimemin <- round(trips$tripduration/60)
+trips$day <- factor(weekdays(as.Date(trips$starttime)), 
+                    levels=c("Monday","Tuesday","Wednesday",
+                    "Thursday","Friday","Saturday", "Sunday"))
+
+
+station$onlinedate <- strptime(station$online.date,format="%m/%d/%Y")
+station <- station %>% select(-online.date) 
+head(station)
+
+#Merging in starting and ending station information for each trip
+trips2 <- merge(trips,station, by.x="from_station_id", by.y="id", all.x=T , all.y=F)
+trips3 <- merge(trips2,station, by.x="to_station_id", by.y="id", all.x=T , all.y=F)
+
+#Making a weekend variable
+trips3$startdate <- strptime(substr(trips$starttime,1,10) ,format="%Y-%m-%d")
+trips3$weekend <- "Week"
+trips3$weekend[trips3$day == "Saturday" | trips3$day == "Sunday" ] <- "Weekend"
+
+```
+##Data Introduction
+Chicago has a bike share program known as Divvy.  The data for bike rides in 2013 and 2014 was recently made available to the public.  There were two main datasets included in the data made available to the public: a station information dataset and a trips information dataset.  I elected to work with the Q1Q2 2014 datasets because the program was relatively new in 2013 (and had some odd qualities). I analyzed rides that took place in May and JUne---relatively nice weather months in Chicago.
+
+
+Metadata for Trips Table:
+Variables:
+trip_id: ID attached to each trip taken
+starttime: day and time trip started, in CST
+stoptime: day and time trip ended, in CST
+bikeid: ID attached to each bike
+tripduration: time of trip in seconds 
+from_station_name: name of station where trip originated
+to_station_name: name of station where trip terminated 
+from_station_id: ID of station where trip originated
+to_station_id: ID of station where trip terminated
+usertype: "Customer" is a rider who purchased a 24-Hour Pass; "Subscriber" is a rider who purchased an Annual Membership
+gender: gender of rider 
+birthyear: birth year of rider
+
+Notes:
+* First row contains column names
+* Total records = 905,699 (but for May and June 2014 there were 624,752 stations)
+* Trips that did not include a start or end date were removed from original table.
+* Gender and birthday are only available for Subscribers
+
+
+
+```{r,warning=FALSE, echo=FALSE}
+head(trips3)
+```
+
+
+Metadata for Stations table:
+
+Variables:
+
+name: station name    
+latitude: station latitude
+longitude: station longitude
+dpcapacity: number of total docks at each station as of 8/20/2014
+online date: date the station went live in the system
+```{r, echo=FALSE, warning=FALSE}
+head(station)
+```
+
+I also thought that it would be useful to add in some historical local weather information from wunderground.com in order to explain any low ridership days due to inclemental weather.
+
+```{r, echo=FALSE, warning=FALSE}
+#Scraping weather data from outside source
+URL <- "http://www.wunderground.com/history/airport/KORD/2014/5/1/MonthlyHistory.html?req_city=&req_state=&req_statename=&reqdb.zip=&reqdb.magic=&reqdb.wmo=&format=1"
+data_raw <- getURL(URL)
+may <- read.csv(textConnection(data_raw))
+URL <- "http://www.wunderground.com/history/airport/KORD/2014/6/1/MonthlyHistory.html?req_city=&req_state=&req_statename=&reqdb.zip=&reqdb.magic=&reqdb.wmo=&format=1"
+data_raw <- getURL(URL)
+june <- read.csv(textConnection(data_raw))
+weather <- rbind(may,june)
+```
+
+```{r, echo=FALSE, warning=FALSE}
+#Selecting only necessary fields from weather data
+weather<- weather %>% select(CDT, Events)
+weather$date<-strptime(weather$CDT,format="%Y-%m-%d")
+head(weather)
+
+#Merging user type and weather information data
+counts_by_user <- count(trips3, c("usertype","startdate"))
+counts_by_user$date <- as.character(counts_by_user$startdate)
+counts_by_user.weather <- merge(x = counts_by_user, y = weather, by.x="date", by.y="date", all.x=T, all.y=F)
+
+counts_by_user.weather$date <- strptime(counts_by_user.weather$date,format="%Y-%m-%d")
+counts_by_user.weather$day <- factor(weekdays(as.Date(counts_by_user.weather$date)), 
+                                   levels=c("Monday","Tuesday","Wednesday",
+                                            "Thursday","Friday","Saturday", "Sunday"))
+
+counts_by_user.weather$weekend<-"Week"
+
+counts_by_user.weather$weekend[counts_by_user.weather$day =="Saturday" | counts_by_user.weather$day =="Sunday" ] <- "Weekend"
+counts_by_user.weather$weather <-  "No Rain"
+counts_by_user.weather$weather[grep("Rain",counts_by_user.weather$Events)] <- "Rain"
+counts_by_user.weather$weather[grep("Thunderstorm",counts_by_user.weather$Events)] <- "Thunderstorm"
+```
+
+##Data Analysis
+I initially thought it might be useful to look at the number of rides per day across users. The following graph also encodes information about whether or the day was a weekend day or if the day happened to have rain or thunderstorms.  In general, subscribers of the service seem to use the ride service much more frequently than customers (people without subscriptions); if customers use the ride service on a given day more than regular subscribers, it seems to be a Friday or weekend day.  There also seemsto be an uptick in rides in June, I believe this porbably is related to the summer holidays.  Subscribers also seem to be less negatively affected by rain and thunderstorms than customers without a subscription.
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+
+cnts.user.weat <- counts_by_user.weather
+
+#Plotting counts of users by day of week and weather
+ggplot(data=cnts.user.weat, aes(date,freq, linetype = usertype)) + 
+  geom_point(data=cnts.user.weat, 
+             aes(shape=weekend, color=weather),size=3) +
+  geom_line(data=cnts.user.weat[ cnts.user.weat$usertype == "Customer",] ,
+            aes(fill=usertype, group=usertype), color="red") + 
+  geom_line(data=cnts.user.weat[ cnts.user.weat$usertype == "Subscriber",], 
+            aes(fill=usertype, group=usertype)) + 
+  theme_bw() + 
+  scale_color_brewer(type="qual", palette = "Set1") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  theme(plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) + 
+  scale_x_datetime(breaks=pretty_breaks(18)) +
+  ggtitle("Number of Daily Divvy Rides by Rider Type\n May and June 2014") +
+  ylab("Number of Rides") +  
+  xlab("Date") 
+
+```
+
+I also thought it might be useful to look at the total number of rides on a weekday basis by gender (information only available for subscribers).  As you can see, males seems to make up a much larger portion of subscribers or the service than females.  The average age of male riders also seems to be slightly higher and more right skewed than for females.  Perhaps Divvy should run a promotion to offer females a discounted first year membership.
+
+```{r,echo=FALSE, warning=FALSE}
+counts_by_user1 <- count(trips3, c("usertype","startdate", "gender"))
+counts_by_user1$date <- strptime(counts_by_user1$startdate,format="%Y-%m-%d")
+counts_by_user1$day <- factor(weekdays(as.Date(counts_by_user1$date)), 
+                                   levels=c("Monday","Tuesday","Wednesday", "Thursday","Friday","Saturday", "Sunday"))
+counts_by_user1$usertype <- as.character(counts_by_user1$usertype)
+
+
+counts_by_user1$usertype[counts_by_user1$usertype == "Subscriber"] <-"Subscriber: Male"
+counts_by_user1$usertype[counts_by_user1$gender == "Female"] <-"Subscriber: Female"
+
+
+
+mean_use_by_weekday<-aggregate(freq~ usertype +day, 
+                                           data=counts_by_user1,  FUN=mean, na.rm=TRUE)
+
+ggplot(data=mean_use_by_weekday, aes(x=day,y=freq,fill=usertype)) + geom_bar(stat='identity', group=mean_use_by_weekday$usertype ) +
+theme_bw() + ylab("Frequency") + xlab("Day of the Week") +
+  scale_fill_brewer(type = "qual", palette = "Set1") +ggtitle("Average Daily Rides by User Type \n May and June 2014")
+
+counts_by_user1$usertype<-as.character(counts_by_user1$usertype)
+
+
+counts_by_user1$usertype[counts_by_user1$usertype == "Subscriber"] <-"Subscriber: Male"
+counts_by_user1$usertype[counts_by_user1$gender == "Female"] <-"Subscriber: Female"
+
+ta<-trips3[,c(13, 14,10)]
+
+ta$gender <- as.character(ta$gender)
+ta <- ta[complete.cases(ta),]
+ta <- ta[ ta$gender %in% c("Female", "Male") & ta$user_age < 100,]
+
+
+ggplot(ta, aes(x = user_age,  colour=gender))  + geom_density(alpha = 0.5, size=1) +theme_bw() + scale_fill_brewer(palette="Spectral") + ggtitle("Density of Sunscriber User \n Rides by Age and Gender")  + xlab("Age") + ylab("Density")
+
+```
+
+Additionally, I thought it might be interesting to look at the average number of rides per station by geographical location.  As you can see subscribers tend to start their trips at bike stations just slightly further out of the city center than nonsubscribers; this is probably due to the fact that nonsubscribers can be tourists just renting bikes for a day of sightseeing.  
+
+```{r,echo=FALSE, warning=FALSE}
+#######################  map of average station use ################################
+
+counts_by_weekday<-count(trips3,c("usertype", "latitude.x", "longitude.x", "startdate" ))
+counts_by_weekday$startdate<-as.character(counts_by_weekday$startdate)
+mean_counts_by_weekday<-aggregate(freq~ usertype+latitude.x + longitude.x, 
+                                  data=counts_by_weekday,  FUN=mean, na.rm=TRUE)
+
+center_lat<-median(station$latitude) +.005
+center_lon<-median(station$longitude) 
+mapImageData <- get_googlemap(center = c(lon = center_lon, lat = center_lat),
+                              zoom = 12,
+                              # size = c(500, 500),
+                              maptype='roadmap', color='bw' ) 
+#size=quantity to get ball sized by group
+base_map<-ggmap(mapImageData) + theme(axis.line=element_blank(),
+          axis.text.x=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks=element_blank(),
+          axis.title.x=element_blank(),
+          axis.title.y=element_blank(), legend.title=element_blank())
+
+#mean_counts_by_weekday$frequency <- 
+mean_counts_by_weekday$frequency <- cut(mean_counts_by_weekday$freq, 
+    breaks=c(0, 10, 20, 50, 100, 250), include.lowest=TRUE)
+
+
+###Average Rides by customer type
+
+plot1<-base_map +  
+  geom_point(data=mean_counts_by_weekday[mean_counts_by_weekday$usertype=="Subscriber",], 
+             aes(x=longitude.x,y=latitude.x, color=frequency , size=frequency), alpha=0.8) +
+  scale_color_brewer(type="qual", palette = "Set1") +  
+  ggtitle("Subscriber: Average Number \n of Daily Rides by Station \n May and June 2014") +
+  theme(legend.position="bottom")
+
+plot2<-base_map +  
+  geom_point(data=mean_counts_by_weekday[mean_counts_by_weekday$usertype=="Customer",], 
+             aes(x=longitude.x,y=latitude.x, color=frequency , size=frequency), alpha=0.8) +
+  scale_color_brewer(type="qual", palette = "Set1") +  
+  ggtitle("Customer Average Number of \n Daily Rides by Station \n May and June 2014")  +
+  theme(legend.position="bottom")
+
+grid.arrange(plot1, plot2, ncol=2)
+
+
+
+```
+```{r,echo=FALSE, warning=FALSE}
+
+
+################################ MAP Of station usage by weekend vs weekday ###########
+
+counts_by_weekday$date<-strptime(counts_by_weekday$startdate,format="%Y-%m-%d")
+counts_by_weekday$day<-factor(weekdays(as.Date(counts_by_weekday$date)), 
+                              levels=c("Monday","Tuesday","Wednesday",
+                                       "Thursday","Friday","Saturday", "Sunday"))
+
+counts_by_weekday$weekend<-"Week"
+
+counts_by_weekday$weekend[counts_by_user.weather$day =="Saturday" | counts_by_user.weather$day =="Sunday" ] <- "Weekend"
+
+mean_counts_by_daytype<-aggregate(freq~ usertype+latitude.x + longitude.x + weekend, 
+                                  data=counts_by_weekday,  FUN=mean, na.rm=TRUE)
+
+
+mean_counts_by_daytype$frequency <- cut(mean_counts_by_daytype$freq, 
+                                        breaks=c(0, 10, 20, 50, 100, 250), include.lowest=TRUE)
+
+plot3<-base_map +  
+  geom_point(data=mean_counts_by_daytype[mean_counts_by_daytype$usertype=="Subscriber" 
+                                         & mean_counts_by_daytype$weekend=="Week",], 
+             aes(x=longitude.x,y=latitude.x, color=frequency , size=frequency), alpha=0.8) +
+  scale_color_brewer(type="qual", palette = "Set1") +  
+  ggtitle("Subscriber: Average Number of \n Weekday Rides by Station") +
+  theme(legend.position=c(.9,.8)) 
+
+plot4<-base_map +  
+  geom_point(data=mean_counts_by_daytype[mean_counts_by_daytype$usertype=="Subscriber" 
+                                         & mean_counts_by_daytype$weekend=="Weekend",], 
+             aes(x=longitude.x,y=latitude.x, color=frequency , size=frequency), alpha=0.8) +
+  scale_color_brewer(type="qual", palette = "Set1") +  
+  ggtitle("Subscriber: Average Number of \n Weekend Rides by Station") +
+  theme(legend.position=c(.9,.8)) 
+
+
+plot5<-base_map +  
+  geom_point(data=mean_counts_by_daytype[mean_counts_by_daytype$usertype=="Customer" 
+                                         & mean_counts_by_daytype$weekend=="Week",], 
+             aes(x=longitude.x,y=latitude.x, color=frequency , size=frequency), alpha=0.8) +
+  scale_color_brewer(type="qual", palette = "Set1") +  
+  ggtitle("Customer: Average Number of \n Weekday Rides by Station") +
+  theme(legend.position=c(.9,.8)) 
+plot6<-base_map +  
+  geom_point(data=mean_counts_by_daytype[mean_counts_by_daytype$usertype=="Customer" 
+                                         & mean_counts_by_daytype$weekend=="Weekend",], 
+             aes(x=longitude.x,y=latitude.x, color=frequency , size=frequency), alpha=0.8) +
+  scale_color_brewer(type="qual", palette = "Set1") +  
+  ggtitle("Customer: Average Number of \n Weekend Rides by Station") +
+  theme(legend.position=c(.9,.8)) 
+
+```
+
+The pick up of bikes from stations does not appear to change too much from weekdays versuses weekends for both user types; it appears like the two groups have different patterns in general, but not much change in riding types over the weekend within the groups.
+
+```{r, echo=FALSE, warning=FALSE}
+grid.arrange(plot3, plot4,  ncol=2)
+grid.arrange(plot5, plot6,  ncol=2)
+
+```
+```{r, echo=FALSE, warning=FALSE}
+trips3$startdate<-as.character(trips3$startdate)
+mean_time_by_weekday<-aggregate(triptimemin~ usertype + longitude.x + latitude.x + weekend, 
+                                           data=trips3[trips3$triptimemin<=90 & trips3$triptimemin >1, ],  FUN=mean, na.rm=TRUE)
+
+mean_time_by_weekday$average.time.min <- cut(mean_time_by_weekday$triptimemin, 
+                                        breaks=c(0, 10, 15, 20, 25, 30, 60, 90), include.lowest=TRUE)
+
+
+
+plot7<-base_map +  
+  geom_point(data=mean_time_by_weekday[mean_time_by_weekday$usertype=="Subscriber" 
+                                         & mean_time_by_weekday$weekend=="Week",], 
+             aes(x=longitude.x,y=latitude.x, color=average.time.min , size=average.time.min ), alpha=0.8) +
+  scale_color_brewer(type="qual", palette = "Set1") +  
+  ggtitle("Subscriber: Average Length \n of Weekday Rides  \n (Mins) by Station") +
+  theme(legend.position=c(.9,.8)) 
+
+
+
+plot8<-base_map +  
+  geom_point(data=mean_time_by_weekday[mean_time_by_weekday$usertype=="Subscriber" 
+                                         & mean_time_by_weekday$weekend=="Weekend",], 
+             aes(x=longitude.x,y=latitude.x, color=average.time.min , size=average.time.min ), alpha=0.8) +
+  scale_color_brewer(type="qual", palette = "Set1") +  
+  ggtitle("Subscriber: Average Length \n of Weekend Rides \n (Mins) by Station") +
+  theme(legend.position=c(.9,.8)) 
+
+
+
+plot9<-base_map +  
+  geom_point(data=mean_time_by_weekday[mean_time_by_weekday$usertype=="Customer" 
+                                         & mean_time_by_weekday$weekend=="Week",], 
+             aes(x=longitude.x,y=latitude.x, color=average.time.min , size=average.time.min ), alpha=0.8) +
+  scale_color_brewer(type="qual", palette = "Set1") +  
+  ggtitle("Customer: Average Length \n of Weekday Rides \n (Mins) by Station") +
+  theme(legend.position=c(.9,.8)) 
+
+
+
+plot10<-base_map +  
+  geom_point(data=mean_time_by_weekday[mean_time_by_weekday$usertype=="Customer" 
+                                         & mean_time_by_weekday$weekend=="Weekend",], 
+             aes(x=longitude.x,y=latitude.x, color=average.time.min , size=average.time.min ), alpha=0.8) +
+  scale_color_brewer(type="qual", palette = "Set1") +  
+  ggtitle("Customer: Average Length \n of Weekend Rides \n (Mins) by Station") +
+  theme(legend.position=c(.9,.8)) 
+```
+
+Subscribers seem to have the same riding habits over the week and weekend in terms of bike ride time.  However, nonsubscribing customers tend to have much longer average ride times during the weekend.
+```{r,echo=FALSE, warning=FALSE}
+grid.arrange(plot7, plot8, ncol=2)
+grid.arrange(plot9, plot10, ncol=2)
+````
